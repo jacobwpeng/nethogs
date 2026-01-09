@@ -19,5 +19,13 @@
  *USA.
  *
  */
+#ifndef __CONNINODE_H
+#define __CONNINODE_H
+
 // handling the connection->inode mapping
 void refreshconninode();
+
+// enable network namespace support for containers
+extern bool enable_netns;
+
+#endif

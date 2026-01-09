@@ -12,6 +12,8 @@
 #include <unistd.h>
 #endif
 
+#include "conninode.h"
+
 // The self_pipe is used to interrupt the select() in the main loop
 static std::pair<int, int> self_pipe = std::make_pair(-1, -1);
 static time_t last_refresh_time = 0;
@@ -31,7 +33,7 @@ static void help(bool iserror) {
   // output << "usage: nethogs [-V] [-b] [-d seconds] [-t] [-p] [-f (eth|ppp))]
   // [device [device [device ...]]]\n";
   output << "usage: nethogs [-V] [-h] [-x] [-d seconds] [-v mode] [-c count] "
-            "[-t] [-p] [-s] [-a] [-l] [-f filter] [-C] [-b] [-P pid] "
+            "[-t] [-p] [-s] [-a] [-l] [-f filter] [-C] [-b] [-n] [-P pid] "
             "[device [device [device ...]]]\n";
   output << "		-V : prints version.\n";
   output << "		-h : prints this help.\n";
@@ -59,6 +61,8 @@ static void help(bool iserror) {
             " This may be removed or changed in a future version.\n";
   output << "		device : device(s) to monitor. default is all "
             "interfaces up and running excluding loopback\n";
+  output << "		-n : enable network namespace support (for monitoring "
+            "traffic inside containers).\n";
   output << "		-P : Show only processes.\n";
   output << std::endl;
   output << "When nethogs is running, press:\n";
@@ -153,7 +157,7 @@ int main(int argc, char **argv) {
   int garbage_collection_period = 50;
 
   int opt;
-  while ((opt = getopt(argc, argv, "Vhxtpsd:v:c:laf:Cbg:P:")) != -1) {
+  while ((opt = getopt(argc, argv, "Vhxtpsd:v:c:laf:Cbg:nP:")) != -1) {
     switch (opt) {
     case 'V':
       versiondisplay();
@@ -200,6 +204,9 @@ int main(int argc, char **argv) {
       break;
     case 'g':
       garbage_collection_period = (time_t)atoi(optarg);
+      break;
+    case 'n':
+      enable_netns = true;
       break;
     case 'P':
       pidsToWatch.insert((pid_t)atoi(optarg));

@@ -21,9 +21,13 @@
  */
 
 #include <cstdio>
+#include <cstring>
+#include <dirent.h>
 #include <map>
 #include <netinet/in.h>
+#include <set>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "conninode.h"
 #include "nethogs.h"
@@ -37,6 +41,10 @@
 extern local_addr *local_addrs;
 extern bool bughuntmode;
 extern bool catchall;
+
+// enable network namespace support for containers
+bool enable_netns = false;
+
 /*
  * connection-inode table. takes information from /proc/net/tcp.
  * key contains source ip, source port, destination ip, destination
@@ -44,6 +52,9 @@ extern bool catchall;
  */
 std::map<std::string, unsigned long> conninode_tcp;
 std::map<std::string, unsigned long> conninode_udp;
+
+// stores processed network namespace inodes to avoid duplicates
+static std::set<ino_t> processed_netns;
 
 /*
  * parses a /proc/net/tcp-line of the form:
@@ -183,6 +194,112 @@ int addprocinfo(const char *filename,
   return 1;
 }
 
+/**
+ * Get the network namespace inode for a given pid.
+ * Returns 0 on failure.
+ */
+static ino_t get_netns_inode(const char *pid) {
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/%s/ns/net", pid);
+
+  struct stat st;
+  if (stat(path, &st) != 0) {
+    return 0;
+  }
+  return st.st_ino;
+}
+
+/**
+ * Check if a string contains only digits (is a valid PID directory name)
+ */
+static bool is_pid_dir(const char *name) {
+  if (!name || !*name)
+    return false;
+  for (const char *p = name; *p; p++) {
+    if (*p < '0' || *p > '9')
+      return false;
+  }
+  return true;
+}
+
+/**
+ * Read connection info from a specific process's network namespace.
+ */
+static void addprocinfo_for_pid(const char *pid) {
+  char tcp_path[64], tcp6_path[64];
+  char udp_path[64], udp6_path[64];
+
+  snprintf(tcp_path, sizeof(tcp_path), "/proc/%s/net/tcp", pid);
+  snprintf(tcp6_path, sizeof(tcp6_path), "/proc/%s/net/tcp6", pid);
+
+  addprocinfo(tcp_path, conninode_tcp);
+  addprocinfo(tcp6_path, conninode_tcp);
+
+  if (catchall) {
+    snprintf(udp_path, sizeof(udp_path), "/proc/%s/net/udp", pid);
+    snprintf(udp6_path, sizeof(udp6_path), "/proc/%s/net/udp6", pid);
+
+    addprocinfo(udp_path, conninode_udp);
+    addprocinfo(udp6_path, conninode_udp);
+  }
+}
+
+/**
+ * Iterate through all processes and collect connection info from all unique
+ * network namespaces.
+ */
+static void refresh_all_netns() {
+  processed_netns.clear();
+
+  // First, add host namespace (using /proc/self)
+  ino_t host_netns = get_netns_inode("self");
+  if (host_netns != 0) {
+    processed_netns.insert(host_netns);
+  }
+
+  DIR *proc = opendir("/proc");
+  if (proc == NULL) {
+    return;
+  }
+
+  dirent *entry;
+  while ((entry = readdir(proc))) {
+    // Only process directories
+    if (entry->d_type != DT_DIR) {
+      continue;
+    }
+
+    // Check if it's a PID directory
+    if (!is_pid_dir(entry->d_name)) {
+      continue;
+    }
+
+    // Get this process's network namespace
+    ino_t netns_inode = get_netns_inode(entry->d_name);
+    if (netns_inode == 0) {
+      continue;
+    }
+
+    // If this is a new namespace, read its connection table
+    if (processed_netns.find(netns_inode) == processed_netns.end()) {
+      processed_netns.insert(netns_inode);
+      addprocinfo_for_pid(entry->d_name);
+
+      if (bughuntmode) {
+        std::cout << "Added netns from pid " << entry->d_name << " (inode: "
+                  << netns_inode << ")" << std::endl;
+      }
+    }
+  }
+
+  closedir(proc);
+
+  if (bughuntmode) {
+    std::cout << "Total unique network namespaces: " << processed_netns.size()
+              << std::endl;
+  }
+}
+
 void refreshconninode() {
   /* we don't forget old mappings, just overwrite */
   // delete conninode;
@@ -208,6 +325,11 @@ void refreshconninode() {
     }
     addprocinfo("/proc/net/udp6", conninode_udp);
 #endif
+  }
+
+  // If network namespace support is enabled, scan all namespaces
+  if (enable_netns) {
+    refresh_all_netns();
   }
 
   // if (DEBUG)
